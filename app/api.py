@@ -1,4 +1,5 @@
 import shutil
+from difflib import SequenceMatcher
 from pathlib import Path
 from uuid import uuid4
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -26,7 +27,7 @@ def document_view(doc: Document) -> dict:
 def invoice_view(invoice: Invoice) -> dict:
     return {"id": invoice.id, "document_id": invoice.document_id, "invoice_number": invoice.invoice_number,
             "invoice_date": invoice.invoice_date, "supplier_name": invoice.supplier_name, "customer_name": invoice.customer_name,
-            "subtotal": invoice.subtotal, "tax": invoice.tax, "total": invoice.total, "currency": invoice.currency,
+            "subtotal": invoice.subtotal, "tax": invoice.tax, "adjustment": invoice.adjustment, "total": invoice.total, "currency": invoice.currency,
             "line_items": invoice.line_items, "confidence": invoice.confidence,
             "validations": [{"rule": x.rule, "severity": x.severity, "message": x.message} for x in invoice.validations]}
 
@@ -36,6 +37,29 @@ def reconciliation_view(result: ReconciliationResult, db: Session) -> dict:
     return {"id": result.id, "match_score": result.match_score, "status": result.status,
             "differences": result.differences, "candidate": invoice_view(candidate) if candidate else None,
             "created_at": result.created_at}
+
+
+def _normalized_identifier(value: str | None) -> str:
+    return "".join(character for character in (value or "").lower() if character.isalnum())
+
+
+def _search_score(invoice: Invoice, query: str) -> int:
+    """Return a capped, user-facing match percentage for an invoice search."""
+    needle = query.strip().lower()
+    identifier = _normalized_identifier(needle)
+    invoice_identifier = _normalized_identifier(invoice.invoice_number)
+
+    if identifier and invoice_identifier:
+        if identifier == invoice_identifier:
+            return 100
+        if identifier.isdigit() and invoice_identifier.isdigit():
+            return round(SequenceMatcher(None, identifier, invoice_identifier).ratio() * 100)
+
+    if needle and needle in (invoice.supplier_name or "").lower():
+        return 90
+    if needle and needle in (invoice.document.text or "").lower():
+        return 70
+    return 0
 
 
 @router.post("/documents/upload", status_code=202)
@@ -52,11 +76,14 @@ def upload_documents(files: list[UploadFile] = File(...), db: Session = Depends(
             path.unlink(); raise HTTPException(413, "File exceeds configured upload limit")
         doc = Document(filename=upload.filename or path.name, content_type=upload.content_type, storage_path=str(path))
         db.add(doc); db.flush(); db.add(AuditEvent(document_id=doc.id, event="queued", detail={})); db.commit(); db.refresh(doc)
-        try:
-            process_document_task.delay(doc.id)
-        except Exception:
-            # Local development remains useful without Redis/Celery.
+        if settings.process_synchronously:
             process_document(db, doc.id); db.refresh(doc)
+        else:
+            try:
+                process_document_task.delay(doc.id)
+            except Exception:
+                # Local development remains useful without Redis/Celery.
+                process_document(db, doc.id); db.refresh(doc)
         accepted.append(document_view(doc))
     return {"documents": accepted}
 
@@ -73,15 +100,37 @@ def get_document(document_id: int, db: Session = Depends(get_db)):
     return document_view(doc)
 
 
+@router.delete("/documents/{document_id}", status_code=204)
+def delete_document(document_id: int, db: Session = Depends(get_db)):
+    doc = db.get(Document, document_id)
+    if not doc:
+        raise HTTPException(404, "Document not found")
+
+    invoice_id = doc.invoice.id if doc.invoice else None
+    if invoice_id is not None:
+        # A reconciliation can reference this invoice as either its source or candidate.
+        db.query(ReconciliationResult).filter(
+            or_(ReconciliationResult.source_invoice_id == invoice_id, ReconciliationResult.matched_invoice_id == invoice_id)
+        ).delete(synchronize_session=False)
+    db.query(AuditEvent).filter_by(document_id=document_id).delete(synchronize_session=False)
+    source_path = Path(doc.storage_path)
+    db.delete(doc)
+    db.commit()
+    source_path.unlink(missing_ok=True)
+
+
 @router.post("/documents/{document_id}/reprocess", status_code=202)
 def reprocess(document_id: int, db: Session = Depends(get_db)):
     doc = db.get(Document, document_id)
     if not doc: raise HTTPException(404, "Document not found")
     doc.status = "queued"; doc.error = None; db.commit()
-    try:
-        process_document_task.delay(doc.id)
-    except Exception:
+    if settings.process_synchronously:
         process_document(db, doc.id)
+    else:
+        try:
+            process_document_task.delay(doc.id)
+        except Exception:
+            process_document(db, doc.id)
     return {"id": doc.id, "status": "queued"}
 
 
@@ -93,10 +142,13 @@ def retry_failed_documents(db: Session = Depends(get_db)):
         db.add(AuditEvent(document_id=doc.id, event="retry_queued", detail={}))
     db.commit()
     for doc in failed:
-        try:
-            process_document_task.delay(doc.id)
-        except Exception:
+        if settings.process_synchronously:
             process_document(db, doc.id)
+        else:
+            try:
+                process_document_task.delay(doc.id)
+            except Exception:
+                process_document(db, doc.id)
     return {"retried_document_ids": [doc.id for doc in failed]}
 
 
@@ -129,20 +181,27 @@ def invoice_history(invoice_id: int, db: Session = Depends(get_db)):
 
 @router.get("/search")
 def search(q: str, severity: str | None = None, db: Session = Depends(get_db)):
-    term = f"%{q}%"
-    query = db.query(Invoice).join(Document).filter(or_(Invoice.invoice_number.ilike(term), Invoice.supplier_name.ilike(term), Document.text.ilike(term)))
+    needle = q.strip()
+    if not needle:
+        return []
+    query = db.query(Invoice).join(Document)
     if severity:
         query = query.join(Invoice.validations).filter_by(severity=severity)
     results = []
-    needle = q.lower()
-    for invoice in query.distinct().all():
-        score = 0
-        if (invoice.invoice_number or "").lower() == needle: score += 100
-        elif needle in (invoice.invoice_number or "").lower(): score += 60
-        if needle in (invoice.supplier_name or "").lower(): score += 40
-        if needle in (invoice.document.text or "").lower(): score += 10
-        results.append({"relevance": score, "invoice": invoice_view(invoice)})
-    return sorted(results, key=lambda result: result["relevance"], reverse=True)
+    # PostgreSQL cannot use DISTINCT across the JSON line_items column. The
+    # normal Document join is one-to-one; a severity filter can duplicate an
+    # invoice, so de-duplicate by primary key after retrieval instead.
+    seen_invoice_ids = set()
+    for invoice in query.all():
+        if invoice.id in seen_invoice_ids:
+            continue
+        seen_invoice_ids.add(invoice.id)
+        score = _search_score(invoice, needle)
+        # Numeric input searches by nearest invoice identifier. Text input
+        # retains the existing supplier/extracted-text search behavior.
+        if score >= 50 if needle.isdigit() else score > 0:
+            results.append({"relevance": score, "filename": invoice.document.filename, "invoice": invoice_view(invoice)})
+    return sorted(results, key=lambda result: result["relevance"], reverse=True)[:10]
 
 
 @router.post("/reconciliation/{invoice_id}/run")

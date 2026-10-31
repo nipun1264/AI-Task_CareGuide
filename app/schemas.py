@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 class LineItem(BaseModel):
     description: str | None = None
     quantity: float | None = None
+    unit: str | None = None
     unit_price: float | None = None
     tax: float | None = None
     total: float | None = None
@@ -16,6 +17,7 @@ class InvoiceExtraction(BaseModel):
     customer_name: str | None = None
     subtotal: float | None = None
     tax: float | None = None
+    adjustment: float | None = None
     total: float | None = None
     currency: str | None = None
     line_items: list[LineItem] = Field(default_factory=list)
@@ -30,6 +32,7 @@ class Correction(BaseModel):
     customer_name: str | None = None
     subtotal: float | None = None
     tax: float | None = None
+    adjustment: float | None = None
     total: float | None = None
     currency: str | None = None
     line_items: list[LineItem] | None = None

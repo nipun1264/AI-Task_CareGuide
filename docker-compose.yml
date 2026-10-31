@@ -11,7 +11,7 @@ services:
         condition: service_started
   worker:
     build: .
-    command: celery -A app.workers.celery_app worker --loglevel=INFO
+    command: celery -A app.workers.celery_app worker --loglevel=INFO --queues=documents
     env_file: .env
     volumes: ["uploads:/data/uploads"]
     depends_on:

@@ -5,6 +5,7 @@ import sys
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import inspect, text
 
 # Support both package execution (``uvicorn app.main:app``) and PyCharm's
 # "Run current file" action (``python app/main.py``).
@@ -24,6 +25,10 @@ else:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    # Lightweight compatibility migration for existing local/Docker databases.
+    if "adjustment" not in {column["name"] for column in inspect(engine).get_columns("invoices")}:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE invoices ADD COLUMN adjustment FLOAT"))
     yield
 
 

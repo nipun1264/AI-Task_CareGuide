@@ -1,0 +1,36 @@
+.document-list .document {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  border-top: 1px solid #edf0f5;
+}
+
+.document-list .document-main {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  width: 100%;
+  padding: 12px 10px;
+  text-align: left;
+  color: #1d2939;
+  background: transparent;
+}
+
+.document-list .document-main:hover { background: transparent; }
+.document-list .document:hover, .document-list .document.active { background: #f4f7ff; }
+
+.document-list .delete-document {
+  align-self: center;
+  width: 26px;
+  height: 26px;
+  margin-right: 8px;
+  padding: 0;
+  border-radius: 50%;
+  color: #98a2b3;
+  background: transparent;
+  font-size: 22px;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+.document-list .delete-document:hover { color: #b42318; background: #fee4e2; }

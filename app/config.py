@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
     max_upload_mb: int = 25
+    process_synchronously: bool = False
 
 
 settings = Settings()

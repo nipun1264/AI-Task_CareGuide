@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).parent
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{PROJECT_ROOT / 'document_intelligence.local.db'}")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("STORAGE_PATH", str(PROJECT_ROOT / "storage" / "uploads"))
+os.environ.setdefault("PROCESS_SYNCHRONOUSLY", "true")
 
 from app.main import app  # noqa: E402
 

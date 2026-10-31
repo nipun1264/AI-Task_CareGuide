@@ -27,6 +27,7 @@ class Invoice(Base):
     customer_name: Mapped[str | None] = mapped_column(String(256))
     subtotal: Mapped[float | None] = mapped_column(Float)
     tax: Mapped[float | None] = mapped_column(Float)
+    adjustment: Mapped[float | None] = mapped_column(Float)
     total: Mapped[float | None] = mapped_column(Float)
     currency: Mapped[str | None] = mapped_column(String(8))
     line_items: Mapped[list] = mapped_column(JSON, default=list)

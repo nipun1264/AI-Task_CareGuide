@@ -6,10 +6,11 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from .config import settings
 from .database import get_db
-from .models import AuditEvent, Document, Invoice, ValidationResult
+from .models import AuditEvent, Document, Invoice, ReconciliationResult
 from .schemas import Correction
 from .services.processing import process_document
 from .services.validation import validate_invoice
+from .services.reconciliation import run_reconciliation
 from .workers.tasks import process_document_task
 
 router = APIRouter(prefix="/api/v1")
@@ -28,6 +29,13 @@ def invoice_view(invoice: Invoice) -> dict:
             "subtotal": invoice.subtotal, "tax": invoice.tax, "total": invoice.total, "currency": invoice.currency,
             "line_items": invoice.line_items, "confidence": invoice.confidence,
             "validations": [{"rule": x.rule, "severity": x.severity, "message": x.message} for x in invoice.validations]}
+
+
+def reconciliation_view(result: ReconciliationResult, db: Session) -> dict:
+    candidate = db.get(Invoice, result.matched_invoice_id)
+    return {"id": result.id, "match_score": result.match_score, "status": result.status,
+            "differences": result.differences, "candidate": invoice_view(candidate) if candidate else None,
+            "created_at": result.created_at}
 
 
 @router.post("/documents/upload", status_code=202)
@@ -69,9 +77,27 @@ def get_document(document_id: int, db: Session = Depends(get_db)):
 def reprocess(document_id: int, db: Session = Depends(get_db)):
     doc = db.get(Document, document_id)
     if not doc: raise HTTPException(404, "Document not found")
-    doc.status = "queued"; db.commit()
-    process_document_task.delay(doc.id)
+    doc.status = "queued"; doc.error = None; db.commit()
+    try:
+        process_document_task.delay(doc.id)
+    except Exception:
+        process_document(db, doc.id)
     return {"id": doc.id, "status": "queued"}
+
+
+@router.post("/documents/retry-failed", status_code=202)
+def retry_failed_documents(db: Session = Depends(get_db)):
+    failed = db.query(Document).filter_by(status="failed").all()
+    for doc in failed:
+        doc.status = "queued"; doc.error = None
+        db.add(AuditEvent(document_id=doc.id, event="retry_queued", detail={}))
+    db.commit()
+    for doc in failed:
+        try:
+            process_document_task.delay(doc.id)
+        except Exception:
+            process_document(db, doc.id)
+    return {"retried_document_ids": [doc.id for doc in failed]}
 
 
 @router.patch("/invoices/{invoice_id}")
@@ -79,21 +105,57 @@ def correct_invoice(invoice_id: int, correction: Correction, db: Session = Depen
     invoice = db.get(Invoice, invoice_id)
     if not invoice: raise HTTPException(404, "Invoice not found")
     changed = correction.model_dump(exclude_unset=True)
+    reason = changed.pop("reason", None)
     for key, value in changed.items(): setattr(invoice, key, [item.model_dump() for item in value] if key == "line_items" and value else value)
-    db.add(AuditEvent(document_id=invoice.document_id, event="manual_correction", detail=changed)); db.flush(); validate_invoice(db, invoice); db.commit(); db.refresh(invoice)
+    db.add(AuditEvent(document_id=invoice.document_id, event="manual_correction", detail={"changed": changed, "reason": reason})); db.flush(); validate_invoice(db, invoice); db.commit(); db.refresh(invoice)
     return invoice_view(invoice)
 
 
+@router.post("/invoices/{invoice_id}/validate")
+def validate_existing_invoice(invoice_id: int, db: Session = Depends(get_db)):
+    invoice = db.get(Invoice, invoice_id)
+    if not invoice: raise HTTPException(404, "Invoice not found")
+    validate_invoice(db, invoice); db.commit(); db.refresh(invoice)
+    return invoice_view(invoice)
+
+
+@router.get("/invoices/{invoice_id}/history")
+def invoice_history(invoice_id: int, db: Session = Depends(get_db)):
+    invoice = db.get(Invoice, invoice_id)
+    if not invoice: raise HTTPException(404, "Invoice not found")
+    events = db.query(AuditEvent).filter_by(document_id=invoice.document_id).order_by(AuditEvent.created_at.desc()).all()
+    return [{"event": event.event, "detail": event.detail, "created_at": event.created_at} for event in events]
+
+
 @router.get("/search")
-def search(q: str, db: Session = Depends(get_db)):
+def search(q: str, severity: str | None = None, db: Session = Depends(get_db)):
     term = f"%{q}%"
-    results = db.query(Invoice).join(Document).filter(or_(Invoice.invoice_number.ilike(term), Invoice.supplier_name.ilike(term), Document.text.ilike(term))).all()
-    return [invoice_view(invoice) for invoice in results]
+    query = db.query(Invoice).join(Document).filter(or_(Invoice.invoice_number.ilike(term), Invoice.supplier_name.ilike(term), Document.text.ilike(term)))
+    if severity:
+        query = query.join(Invoice.validations).filter_by(severity=severity)
+    results = []
+    needle = q.lower()
+    for invoice in query.distinct().all():
+        score = 0
+        if (invoice.invoice_number or "").lower() == needle: score += 100
+        elif needle in (invoice.invoice_number or "").lower(): score += 60
+        if needle in (invoice.supplier_name or "").lower(): score += 40
+        if needle in (invoice.document.text or "").lower(): score += 10
+        results.append({"relevance": score, "invoice": invoice_view(invoice)})
+    return sorted(results, key=lambda result: result["relevance"], reverse=True)
+
+
+@router.post("/reconciliation/{invoice_id}/run")
+def reconcile(invoice_id: int, candidate_ids: list[int] | None = None, db: Session = Depends(get_db)):
+    source = db.get(Invoice, invoice_id)
+    if not source: raise HTTPException(404, "Invoice not found")
+    reports = run_reconciliation(db, source, candidate_ids); db.commit()
+    return [reconciliation_view(report, db) for report in reports]
 
 
 @router.get("/reconciliation/{invoice_id}")
-def reconcile(invoice_id: int, db: Session = Depends(get_db)):
+def reconciliation_results(invoice_id: int, db: Session = Depends(get_db)):
     source = db.get(Invoice, invoice_id)
     if not source: raise HTTPException(404, "Invoice not found")
-    candidates = db.query(Invoice).filter(Invoice.id != source.id, or_(Invoice.invoice_number == source.invoice_number, Invoice.supplier_name == source.supplier_name)).all()
-    return [{"invoice": invoice_view(other), "total_matches": other.total == source.total, "number_matches": other.invoice_number == source.invoice_number} for other in candidates]
+    reports = db.query(ReconciliationResult).filter_by(source_invoice_id=invoice_id).order_by(ReconciliationResult.match_score.desc()).all()
+    return [reconciliation_view(report, db) for report in reports]

@@ -23,6 +23,7 @@ class InvoiceExtraction(BaseModel):
 
 
 class Correction(BaseModel):
+    reason: str | None = None
     invoice_number: str | None = None
     invoice_date: str | None = None
     supplier_name: str | None = None

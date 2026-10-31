@@ -25,7 +25,7 @@ services:
       POSTGRES_DB: document_intelligence
       POSTGRES_USER: document_intelligence
       POSTGRES_PASSWORD: document_intelligence
-    ports: ["5432:5432"]
+    ports: ["5433:5432"]
     volumes: ["postgres:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U document_intelligence -d document_intelligence"]

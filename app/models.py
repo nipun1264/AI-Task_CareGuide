@@ -51,3 +51,14 @@ class AuditEvent(Base):
     event: Mapped[str] = mapped_column(String(64))
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ReconciliationResult(Base):
+    __tablename__ = "reconciliation_results"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.id"), index=True)
+    matched_invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.id"), index=True)
+    match_score: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(32))
+    differences: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

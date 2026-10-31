@@ -1,0 +1,10 @@
+import {useEffect, useState} from 'react';
+const api='http://localhost:8000/api/v1';
+export default function Home(){
+ const [docs,setDocs]=useState([]),[busy,setBusy]=useState(false),[query,setQuery]=useState(''),[results,setResults]=useState([]);
+ const refresh=()=>fetch(`${api}/documents`).then(r=>r.json()).then(setDocs).catch(()=>setDocs([]));
+ useEffect(()=>{refresh(); const id=setInterval(refresh,5000); return()=>clearInterval(id)},[]);
+ async function upload(e){const files=e.target.files;if(!files?.length)return;setBusy(true);const body=new FormData();[...files].forEach(f=>body.append('files',f));await fetch(`${api}/documents/upload`,{method:'POST',body});setBusy(false);refresh();}
+ async function search(e){e.preventDefault();setResults(await fetch(`${api}/search?q=${encodeURIComponent(query)}`).then(r=>r.json()));}
+ return <main><h1>Document Intelligence</h1><p>Upload invoices and monitor extraction, financial checks, and reconciliation.</p><section><label className="upload">{busy?'Processing…':'Upload PDF, image, spreadsheet, or CSV'}<input type="file" multiple onChange={upload}/></label></section><form onSubmit={search}><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search invoice number, supplier, or text"/><button>Search</button></form>{results.length>0&&<section><h2>Search results</h2>{results.map(x=><Invoice key={x.id} invoice={x}/>)}</section>}<section><h2>Documents</h2>{docs.length?docs.map(doc=><article key={doc.id}><b>{doc.filename}</b><span className={'status '+doc.status}>{doc.status}</span>{doc.error&&<p className="error">{doc.error}</p>}{doc.invoice&&<Invoice invoice={doc.invoice}/>}</article>):<p>No documents yet.</p>}</section></main>}
+function Invoice({invoice}){return <div className="invoice"><b>{invoice.invoice_number||'Invoice number unavailable'}</b><p>{invoice.supplier_name||'Supplier unavailable'} · {invoice.currency||''} {invoice.total??'Total unavailable'}</p>{invoice.validations?.map((v,i)=><p className={v.severity} key={i}>{v.rule}: {v.message}</p>)}</div>}

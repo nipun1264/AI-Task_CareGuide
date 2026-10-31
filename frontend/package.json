@@ -1,0 +1,1 @@
+{"scripts":{"dev":"next dev -H 0.0.0.0","build":"next build"},"dependencies":{"next":"15.1.0","react":"19.0.0","react-dom":"19.0.0"},"devDependencies":{}}

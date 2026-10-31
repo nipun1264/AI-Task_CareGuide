@@ -1,0 +1,47 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    ports: ["8000:8000"]
+    volumes: ["uploads:/data/uploads"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+  worker:
+    build: .
+    command: celery -A app.workers.celery_app worker --loglevel=INFO
+    env_file: .env
+    volumes: ["uploads:/data/uploads"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: document_intelligence
+      POSTGRES_USER: document_intelligence
+      POSTGRES_PASSWORD: document_intelligence
+    ports: ["5432:5432"]
+    volumes: ["postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U document_intelligence -d document_intelligence"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    volumes: ["./frontend:/app"]
+    ports: ["3000:3000"]
+    depends_on: [api]
+volumes:
+  postgres:
+  uploads:

@@ -39,7 +39,9 @@ services:
     image: node:22-alpine
     working_dir: /app
     command: sh -c "npm install && npm run dev"
-    volumes: ["./frontend:/app"]
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
     ports: ["3000:3000"]
     depends_on: [api]
 volumes:

@@ -1,4 +1,6 @@
 import re
+import csv
+from calendar import month_name
 from datetime import datetime
 from math import isclose
 from pathlib import Path
@@ -39,9 +41,22 @@ def extract_text(path: str) -> str:
         return f"{primary}\n\n{sparse}"
     if suffix in {".xlsx", ".xls"}:
         import pandas as pd
+        # First inspect the unheaded grid.  Many accounting exports are a
+        # formatted invoice template rather than a normal data table, and the
+        # labels and values live in separate columns.
+        raw_book = pd.read_excel(file, sheet_name=None, header=None, dtype=str, keep_default_na=False)
+        layout_sections = [_csv_layout_text(frame.values.tolist()) for frame in raw_book.values()]
+        layout_text = "\n\n".join(section for section in layout_sections if section)
+        if layout_text:
+            return layout_text
         book = pd.read_excel(file, sheet_name=None, dtype=str, keep_default_na=False)
         return _tabular_text(book)
     if suffix == ".csv":
+        with file.open(encoding="utf-8-sig", errors="replace", newline="") as source:
+            rows = list(csv.reader(source))
+        layout_text = _csv_layout_text(rows)
+        if layout_text:
+            return layout_text
         import pandas as pd
         frame = pd.read_csv(file, dtype=str, keep_default_na=False, encoding="utf-8-sig")
         return _tabular_text({"CSV": frame})
@@ -61,6 +76,68 @@ def _tabular_text(sheets: dict) -> str:
         # header row such as "Subtotal,Tax,Total" being parsed as a value.
         sections.append(f"[{name}]\n" + "\n\n".join(records))
     return "\n\n".join(sections)
+
+
+def _csv_layout_text(rows: list[list[str]]) -> str:
+    """Normalize visually laid-out CSV invoice templates without losing cell positions."""
+    cleaned = [[cell.strip() for cell in row] for row in rows]
+    # Ordinary CSVs start with a dense header row and should follow the
+    # existing header/value normalization path instead.
+    if cleaned and sum(bool(cell) for cell in cleaned[0]) > 1:
+        return ""
+    lines: list[str] = []
+
+    def right_value(row: list[str], index: int) -> str | None:
+        return next((cell for cell in row[index + 1:] if cell), None)
+
+    labels = {
+        "invoice #": "Invoice No", "invoice no": "Invoice No", "invoice number": "Invoice No",
+        "date": "Date", "credit date": "Date", "to": "Customer", "customer": "Customer",
+        "customer id/name": "Customer", "seller": "Supplier", "supplier": "Supplier", "vendor": "Supplier",
+        "subtotal": "Subtotal", "sales tax": "Sales Tax", "tax": "Tax", "total": "Total",
+    }
+    for row in cleaned:
+        for index, cell in enumerate(row):
+            output_label = labels.get(cell.lower().rstrip(":"))
+            value = right_value(row, index) if output_label else None
+            if output_label and value and value.lower() not in {"description", "amount", "unit price", "quantity"}:
+                if output_label == "Date":
+                    us_date = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", value)
+                    if us_date and 1 <= int(us_date.group(1)) <= 12:
+                        value = f"{us_date.group(2)} {month_name[int(us_date.group(1))]} {us_date.group(3)}"
+                lines.append(f"{output_label}: {value}")
+
+    for row_index, row in enumerate(cleaned):
+        if any(cell.upper() == "INVOICE" for cell in row):
+            following = next((cell for next_row in cleaned[row_index + 1:row_index + 5] for cell in next_row if cell and cell.upper() not in {"INVOICE", "TO"}), None)
+            if following:
+                lines.append(f"Supplier: {following}")
+            break
+
+    for row_index, row in enumerate(cleaned):
+        headers = {cell.lower(): index for index, cell in enumerate(row) if cell}
+        description_index = headers.get("description")
+        quantity_index = headers.get("qty", headers.get("quantity"))
+        price_index = headers.get("unit price")
+        discount_index = headers.get("discount")
+        amount_index = headers.get("line total", headers.get("amount"))
+        if None in {description_index, quantity_index, price_index, amount_index}:
+            continue
+        for data_row in cleaned[row_index + 1:]:
+            if max(description_index, quantity_index, price_index, amount_index) >= len(data_row):
+                continue
+            description, quantity, price, amount = (data_row[index] for index in (description_index, quantity_index, price_index, amount_index))
+            if not (description and quantity and price and amount):
+                if any(cell.lower() in {"subtotal", "total"} for cell in data_row):
+                    break
+                continue
+            if not re.fullmatch(r"\d+(?:\.\d+)?", quantity):
+                continue
+            discount = data_row[discount_index] if discount_index is not None and discount_index < len(data_row) else ""
+            discount_text = f"\nDiscount: {discount}" if discount else ""
+            lines.append(f"Line Item\nDescription: {description}\nQuantity: {quantity}\nUnit Price: {price}{discount_text}\nAmount: {amount}")
+        break
+    return "\n".join(lines)
 
 
 def _parse_amount(value: str) -> float:
@@ -111,12 +188,19 @@ def _receipt_amount_before_label(text: str, label: str) -> float | None:
 
 def _adjustment(text: str) -> float | None:
     """Return a signed adjustment: discounts/refunds/credits reduce the total."""
+    # The layout normalizer emits per-item discounts as ``Discount:`` lines.
+    # They affect the line total, not the invoice summary, so exclude them
+    # when looking for a document-level adjustment.
+    summary_text = "\n".join(
+        line for line in text.splitlines()
+        if not re.match(r"^\s*discount\s*:", line, re.I)
+    )
     for label in ("less discount", "discount", "refund", "credit note", "credit", "rebate", "return", "exchange"):
-        value = _amount(text, [label]) or _receipt_amount_after_label(text, label) or _receipt_amount_before_label(text, label)
+        value = _amount(summary_text, [label]) or _receipt_amount_after_label(summary_text, label) or _receipt_amount_before_label(summary_text, label)
         if value is not None:
             return -abs(value)
     for label in ("service charge", "surcharge", "additional fee", "adjustment"):
-        value = _amount(text, [label]) or _receipt_amount_after_label(text, label) or _receipt_amount_before_label(text, label)
+        value = _amount(summary_text, [label]) or _receipt_amount_after_label(summary_text, label) or _receipt_amount_before_label(summary_text, label)
         if value is not None:
             return abs(value)
     return None
@@ -262,6 +346,14 @@ def _table_line_items(text: str) -> list[LineItem]:
     return result
 
 
+def _labelled_line_items(text: str) -> list[LineItem]:
+    pattern = re.compile(
+        r"Line Item\s*\nDescription:\s*([^\n]+)\s*\nQuantity:\s*(\d+(?:\.\d+)?)\s*\nUnit Price:\s*[^\d\n]*([\d,]+(?:\.\d{1,2})?)(?:\s*\nDiscount:\s*[^\d\n]*([\d,]+(?:\.\d{1,2})?))?\s*\nAmount:\s*[^\d\n]*([\d,]+(?:\.\d{1,2})?)",
+        re.I,
+    )
+    return [LineItem(description=match.group(1).strip(), quantity=float(match.group(2)), unit_price=_parse_amount(match.group(3)), discount=_parse_amount(match.group(4)) if match.group(4) else None, total=_parse_amount(match.group(5))) for match in pattern.finditer(text)]
+
+
 def _confidence(*, invoice_number: str | None, invoice_date: str | None, supplier_name: str | None,
                 customer_name: str | None, subtotal: float | None, tax: float | None,
                 adjustment: float | None, total: float | None, currency: str | None, line_items: list) -> float:
@@ -278,13 +370,14 @@ def _confidence(*, invoice_number: str | None, invoice_date: str | None, supplie
 
 
 def rule_based_extract(text: str) -> InvoiceExtraction:
-    number = re.search(r"(?:invoice[ \t]*(?:no\.?|number|#)|receipt[ \t]*(?:no\.?|number|#)|inv[ \t]*#|\bno[.,]?)[ \t]*[:#-]?[ \t]*([A-Z0-9][A-Z0-9-]+)", text, re.I)
+    number = re.search(r"(?:invoice[ \t]*(?:no\.?|number|#)|receipt[ \t]*(?:no\.?|number|#)|inv[ \t]*#|\bno\b[.,]?)[ \t]*[:#-]?[ \t]*([A-Z0-9][A-Z0-9-]+)", text, re.I)
     receipt_number = re.search(r"receipt[ \t]*(?:no\.?|number|#)[ \t]*:[ \t]*\n[ \t]*([A-Z0-9-]+)", text, re.I)
     currency = re.search(r"\b(USD|EUR|GBP|BDT|INR)\b|([$€£₹])", text, re.I)
     currency_value = (currency.group(1).upper() if currency and currency.group(1) else currency.group(2)) if currency else ("BDT" if re.search(r"\bTk\.?\b", text, re.I) else None)
     indian_subtotal, indian_tax, indian_total = _indian_tax_summary(text)
     subtotal = indian_subtotal if indian_subtotal is not None else (_amount(text, ["subtotal", "sub total"]) or _receipt_amount_after_label(text, "Sub Total"))
-    tax = indian_tax if indian_tax is not None else (_amount(text, ["sales tax", "tax", "vat", "gst"]) or _amount_before_label(text, ["add vat", "vat"]) or _receipt_amount_before_label(text, "Add VAT"))
+    detected_tax = _amount(text, ["sales tax", "tax", "vat", "gst"])
+    tax = indian_tax if indian_tax is not None else (detected_tax if detected_tax is not None else (_amount_before_label(text, ["add vat", "vat"]) or _receipt_amount_before_label(text, "Add VAT")))
     adjustment = _adjustment(text)
     total = indian_total if indian_total is not None else (_amount_before_label(text, ["net payable"]) or _receipt_amount_before_label(text, "Net Payable") or _receipt_amount_after_label(text, "Net Payable") or _amount(text, ["grand total", "total due", "total"]))
     extracted = {
@@ -297,7 +390,7 @@ def rule_based_extract(text: str) -> InvoiceExtraction:
         "adjustment": adjustment,
         "total": total,
         "currency": currency_value,
-        "line_items": _table_line_items(text),
+        "line_items": _table_line_items(text) or _labelled_line_items(text),
     }
     return InvoiceExtraction(
         **extracted,

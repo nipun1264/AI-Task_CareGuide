@@ -6,6 +6,7 @@ class LineItem(BaseModel):
     quantity: float | None = None
     unit: str | None = None
     unit_price: float | None = None
+    discount: float | None = None
     tax: float | None = None
     total: float | None = None
 

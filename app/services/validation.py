@@ -21,9 +21,9 @@ def validate_invoice(db: Session, invoice: Invoice) -> list[ValidationResult]:
             results.append(ValidationResult(invoice_id=invoice.id, rule="non_negative_amount", severity="error", message=f"{field} cannot be negative."))
     item_totals = []
     for index, item in enumerate(invoice.line_items or [], start=1):
-        quantity, unit_price, item_total = item.get("quantity"), item.get("unit_price"), item.get("total")
+        quantity, unit_price, discount, item_total = item.get("quantity"), item.get("unit_price"), item.get("discount") or 0.0, item.get("total")
         if quantity is not None and unit_price is not None and item_total is not None:
-            expected = round(quantity * unit_price, 2)
+            expected = round(quantity * unit_price - discount, 2)
             if not isclose(expected, item_total, abs_tol=0.02):
                 results.append(ValidationResult(invoice_id=invoice.id, rule="line_item_math", severity="error", message=f"Line {index}: quantity × unit price is {expected:.2f}, but line total is {item_total:.2f}."))
         if item_total is not None:

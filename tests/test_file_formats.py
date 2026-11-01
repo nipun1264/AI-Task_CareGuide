@@ -61,3 +61,48 @@ def test_extracts_image_via_ocr_path(tmp_path, monkeypatch):
     invoice = rule_based_extract(extract_text(str(path)))
     assert invoice.invoice_number == "IMG-001"
     assert invoice.total == 110.0
+
+
+def test_extracts_spreadsheet_style_sales_invoice_csv(tmp_path):
+    path = tmp_path / "sales-layout.csv"
+    path.write_text("""\n,INVOICE,,,,\n,SHADOW BEAUTY,,,,\n,TO,Jens Martensson,,DATE,11/1/2026\n,INVOICE #,54167,,,,\n,QTY,ITEM #,DESCRIPTION,UNIT PRICE,DISCOUNT,LINE TOTAL\n,50,2452,Liquid foundation,$2.75,$0.00,$137.50\n,30,6235,Eyeshadow palette,$1.24,$0.00,$37.20\n,,,,,SUBTOTAL,$174.70\n,,,,,SALES TAX,$0.00\n,,,,,TOTAL,$174.70\n""", encoding="utf-8")
+
+    invoice = rule_based_extract(extract_text(str(path)))
+    assert invoice.invoice_number == "54167"
+    assert invoice.supplier_name == "SHADOW BEAUTY"
+    assert invoice.customer_name == "Jens Martensson"
+    assert invoice.invoice_date == "01/11/2026"
+    assert invoice.subtotal == 174.70
+    assert invoice.tax == 0.0
+    assert invoice.total == 174.70
+    assert invoice.adjustment is None
+    assert [(item.description, item.quantity, item.discount, item.total) for item in invoice.line_items] == [
+        ("Liquid foundation", 50.0, 0.0, 137.50),
+        ("Eyeshadow palette", 30.0, 0.0, 37.20),
+    ]
+
+
+def test_extracts_spreadsheet_style_sales_invoice_xlsx(tmp_path):
+    path = tmp_path / "sales-layout.xlsx"
+    rows = [
+        ["", "INVOICE", "", "", "", "", ""],
+        ["", "SHADOW BEAUTY", "", "", "", "", ""],
+        ["", "TO", "Jens Martensson", "", "DATE", "11/1/2026", ""],
+        ["", "INVOICE #", "54167", "", "", "", ""],
+        ["", "QTY", "ITEM #", "DESCRIPTION", "UNIT PRICE", "DISCOUNT", "LINE TOTAL"],
+        ["", "50", "2452", "Liquid foundation", "$2.75", "$0.00", "$137.50"],
+        ["", "", "", "", "", "SUBTOTAL", "$137.50"],
+        ["", "", "", "", "", "SALES TAX", "$0.00"],
+        ["", "", "", "", "", "TOTAL", "$137.50"],
+    ]
+    pd.DataFrame(rows).to_excel(path, index=False, header=False)
+
+    invoice = rule_based_extract(extract_text(str(path)))
+    assert invoice.invoice_number == "54167"
+    assert invoice.supplier_name == "SHADOW BEAUTY"
+    assert invoice.customer_name == "Jens Martensson"
+    assert invoice.invoice_date == "01/11/2026"
+    assert invoice.subtotal == 137.50
+    assert invoice.tax == 0.0
+    assert invoice.total == 137.50
+    assert len(invoice.line_items) == 1

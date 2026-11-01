@@ -164,6 +164,6 @@ def test_parses_indian_vat_invoice_with_seller_client_and_table_rows():
     assert invoice.total == 2_225_987.50
     assert invoice.currency == "INR"
     assert [item.model_dump() for item in invoice.line_items] == [
-        {"description": "Belkin MagSafe 3-in-1 Wireless Charger", "quantity": 9.0, "unit": "pcs", "unit_price": 8175.0, "tax": 10.0, "total": 73575.0},
-        {"description": "Samsung Galaxy S24 256GB Phantom Black", "quantity": 8.0, "unit": "pcs", "unit_price": 72370.0, "tax": 10.0, "total": 578960.0},
+        {"description": "Belkin MagSafe 3-in-1 Wireless Charger", "quantity": 9.0, "unit": "pcs", "unit_price": 8175.0, "discount": None, "tax": 10.0, "total": 73575.0},
+        {"description": "Samsung Galaxy S24 256GB Phantom Black", "quantity": 8.0, "unit": "pcs", "unit_price": 72370.0, "discount": None, "tax": 10.0, "total": 578960.0},
     ]
